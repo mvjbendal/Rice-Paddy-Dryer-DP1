@@ -13,7 +13,7 @@
 
 // WiFi credentials
 char ssid[] = "Changeme";       // Replace with your WiFi SSID
-char pass[] = "Changeme";      // Replace with your WiFi password
+char pass[] = "Changeme";       // Replace with your WiFi password
 
 // Pin Definitions
 #define ONE_WIRE_BUS 15          // DS18B20 data pin
@@ -29,7 +29,7 @@ DallasTemperature sensors(&oneWire);
 RTC_DS3231 rtc;
 
 // LCD
-LiquidCrystal_I2C lcd(0x27, 16, 2);
+LiquidCrystal_I2C lcd(0x27, 16, 2); // Confirm address with an I2C scanner
 
 // PID Variables
 double Setpoint = 65.0;          // Default target temperature
@@ -54,24 +54,29 @@ void setup() {
   Serial.begin(115200);
 
   // Initialize LCD
-  lcd.begin(16, 2);
-  lcd.backlight();
+  Serial.println("Initializing LCD...");
+  lcd.init(); // Initialize the LCD
+  lcd.backlight(); // Turn on the backlight
+  lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print("Connecting WiFi");
 
   // Initialize DS18B20
   sensors.begin();
 
   // Initialize RTC
   if (!rtc.begin()) {
-    Serial.println("Couldn't find RTC");
+    Serial.println("RTC not found!");
+    lcd.setCursor(0, 0);
     lcd.print("RTC Error");
-    while (1);
+    while (1); // Halt system if RTC is missing
   }
   if (rtc.lostPower()) {
     Serial.println("RTC lost power, setting the time...");
-    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__))); // Set to compile time
   }
+
+  // Initialize previousTime to the current RTC time
+  previousTime = rtc.now();
 
   // Initialize PID
   myPID.SetMode(AUTOMATIC);
@@ -87,26 +92,32 @@ void setup() {
 
   // Start WiFi connection
   WiFi.begin(ssid, pass);
+  lcd.setCursor(0, 1);
+  lcd.print("WiFi Connecting...");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  lcd.clear();
+  lcd.print("WiFi Connected");
+
+  // Initialize Blynk
+  Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
+
+  Serial.println("Setup Complete.");
 }
 
 void loop() {
-  // Check WiFi connection
-  if (WiFi.status() == WL_CONNECTED) {
-    if (!Blynk.connected()) {
-      Serial.println("Connecting to Blynk...");
-      Blynk.config(BLYNK_AUTH_TOKEN);
-      Blynk.connect();
-    }
+  // Run Blynk
+  if (Blynk.connected()) {
     Blynk.run();
   } else {
-    Serial.println("WiFi disconnected. Reconnecting...");
-    WiFi.reconnect();
-    delay(1000);  // Delay before retrying WiFi connection
-    return; // Skip the rest of the loop if WiFi is disconnected
+    Serial.println("Reconnecting to Blynk...");
+    Blynk.connect();
   }
 
-  // Update other functionalities
-  updateCountdown(); // Update countdown timer
+  // Update the countdown timer
+  updateCountdown();
 
   // Request temperature from DS18B20 sensor
   sensors.requestTemperatures();
@@ -115,6 +126,8 @@ void loop() {
   // Check for valid temperature reading
   if (Input == DEVICE_DISCONNECTED_C) {
     Serial.println("Error: DS18B20 not connected!");
+    lcd.setCursor(0, 0);
+    lcd.print("Temp Sensor Err");
     digitalWrite(RELAY_PIN, RELAY_OFF);  // Turn OFF relay
     delay(1000);
     return;
@@ -144,14 +157,12 @@ void handleButtons() {
     Setpoint += 1.0; // Increase Setpoint by 1°C
     lastIncPress = millis(); // Update debounce timer
     Serial.println("Setpoint Increased");
-    if (countdownSeconds > 60) countdownSeconds -= 60;
   }
 
   if (digitalRead(BUTTON_DEC_PIN) == LOW && millis() - lastDecPress > debounceDelay) {
     Setpoint -= 1.0; // Decrease Setpoint by 1°C
     lastDecPress = millis(); // Update debounce timer
     Serial.println("Setpoint Decreased");
-    countdownSeconds += 60;
   }
 }
 
@@ -160,16 +171,33 @@ void setCountdown() {
 }
 
 void updateCountdown() {
+  // Get the current RTC time
   DateTime currentTime = rtc.now();
-  unsigned long elapsedSeconds = currentTime.secondstime() - previousTime.secondstime();
 
+  // Check if RTC returned a valid time
+  if (currentTime.unixtime() == 0) {
+    Serial.println("RTC Error: Current time is invalid.");
+    return;
+  }
+
+  // Calculate elapsed seconds
+  unsigned long elapsedSeconds = currentTime.unixtime() - previousTime.unixtime();
+
+  // If there is a time change, update the countdown and previousTime
   if (elapsedSeconds > 0) {
+    Serial.print("Elapsed Seconds: ");
+    Serial.println(elapsedSeconds);
+
     previousTime = currentTime;
+
+    // Decrease the countdown by elapsed time
     if (countdownSeconds > elapsedSeconds) {
       countdownSeconds -= elapsedSeconds;
     } else {
-      countdownSeconds = 0;
+      countdownSeconds = 0; // Countdown finished
     }
+    Serial.print("Countdown Seconds Remaining: ");
+    Serial.println(countdownSeconds);
   }
 }
 
@@ -180,20 +208,20 @@ void displayInfo() {
 
   lcd.setCursor(0, 0);
   lcd.print("Temp: ");
-  lcd.print(Input);
-  lcd.print("C   ");  // Clear trailing characters
+  lcd.print(Input, 1); // Display temperature with 1 decimal place
+  lcd.print("C   ");
+
   lcd.setCursor(0, 1);
   lcd.printf("Set: %.0fC ", Setpoint);
-  lcd.printf("T:%02lu:%02lu:%02lu", hours, minutes, seconds);
+  lcd.printf("T:%02lu:%02lu:%02lu   ", hours, minutes, seconds);
 
-  Serial.printf("Temp: %.2fC | Set: %.2fC | Timer: %02lu:%02lu:%02lu\n", 
+  Serial.printf("Temp: %.2fC | Set: %.2fC | Timer: %02lu:%02lu:%02lu\n",
                 Input, Setpoint, hours, minutes, seconds);
 
   // Send data to Blynk
-  Blynk.virtualWrite(V0, Input);              // Temperature
-  Blynk.virtualWrite(V1, Setpoint);           // Current setpoint
+  Blynk.virtualWrite(V0, Input);               // Current temperature
+  Blynk.virtualWrite(V1, Setpoint);            // Current setpoint
   Blynk.virtualWrite(V2, String(hours) + ":" +
                            String(minutes) + ":" +
-                           String(seconds));  // Countdown timer
+                           String(seconds));   // Countdown timer
 }
- 
